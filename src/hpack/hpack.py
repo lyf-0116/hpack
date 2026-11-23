@@ -241,14 +241,6 @@ class Encoder:
         # are already in the header table we can represent them using the
         # indexed representation: the same is true if they are in the static
         # table. Otherwise, a literal representation will be used.
-        header_block = []
-
-        # Before we begin, if the header table size has been changed we need
-        # to signal all changes since last emission appropriately.
-        if self.header_table.resized:
-            header_block.append(self._encode_table_size_change())
-            self.header_table.resized = False
-
         if isinstance(headers, dict):
             # Turn the headers into a list of tuples if possible. This is the
             # natural way to interact with them in HPACK. Because dictionaries are
@@ -276,17 +268,43 @@ class Encoder:
             """
             hpack_headers = iter(headers)  # type: ignore
 
-        # Add each header to the header block
-        for header in hpack_headers:
-            sensitive = False
-            if isinstance(header, HeaderTuple):
-                # HeaderTuple implies it's a 2-tuple with the sensitive information stored as instance attribute
-                sensitive = not header.indexable
-            elif len(header) > 2:
-                sensitive = header[2]
+        # Snapshot the encoder state mutated by encoding so that a failure
+        # partway through the block can be rolled back. Without this, an
+        # exception would consume the pending table size update without
+        # emitting it, and leave partially-indexed entries in the header
+        # table, desynchronizing the encoder from the decoder for every
+        # subsequent block on the connection.
+        table_size_changes = self.table_size_changes
+        table_resized = self.header_table.resized
+        dynamic_entries = self.header_table.dynamic_entries.copy()
+        current_size = self.header_table._current_size
 
-            new_header = (_to_bytes(header[0]), _to_bytes(header[1]))
-            header_block.append(self.add(new_header, sensitive, huffman))
+        try:
+            header_block = []
+
+            # Before we begin, if the header table size has been changed we
+            # need to signal all changes since last emission appropriately.
+            if self.header_table.resized:
+                header_block.append(self._encode_table_size_change())
+                self.header_table.resized = False
+
+            # Add each header to the header block
+            for header in hpack_headers:
+                sensitive = False
+                if isinstance(header, HeaderTuple):
+                    # HeaderTuple implies it's a 2-tuple with the sensitive information stored as instance attribute
+                    sensitive = not header.indexable
+                elif len(header) > 2:
+                    sensitive = header[2]
+
+                new_header = (_to_bytes(header[0]), _to_bytes(header[1]))
+                header_block.append(self.add(new_header, sensitive, huffman))
+        except Exception:
+            self.table_size_changes = table_size_changes
+            self.header_table.resized = table_resized
+            self.header_table.dynamic_entries = dynamic_entries
+            self.header_table._current_size = current_size
+            raise
 
         encoded = b"".join(header_block)
 
