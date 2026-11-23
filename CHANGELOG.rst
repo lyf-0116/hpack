@@ -12,6 +12,11 @@ dev
 
 **Bugfixes**
 
+- Setting ``Decoder.header_table_size`` now also updates
+  ``Decoder.max_allowed_table_size``, so the configured limit is enforced in
+  both directions: peers exceeding a lowered limit are rejected, and raising
+  the limit no longer trips the end-of-decode table size check.
+
 
 4.2.0 (2026-06-22)
 ------------------

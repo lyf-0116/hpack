@@ -463,6 +463,8 @@ class Decoder:
         #: for*. Once this setting is set, the actual header table size will be
         #: checked at the end of each decoding run and whenever it is changed,
         #: to confirm that it fits in this size.
+        #:
+        #: Setting ``header_table_size`` also updates this value.
         self.max_allowed_table_size = self.header_table.maxsize
 
     @property
@@ -475,6 +477,7 @@ class Decoder:
     @header_table_size.setter
     def header_table_size(self, value: int) -> None:
         self.header_table.maxsize = value
+        self.max_allowed_table_size = value
 
     def decode(self, data: bytes, raw: bool = False) -> Iterable[HeaderTuple]:
         """
@@ -577,7 +580,7 @@ class Decoder:
         if new_size > self.max_allowed_table_size:
             msg = "Encoder exceeded max allowable table size"
             raise InvalidTableSizeError(msg)
-        self.header_table_size = new_size
+        self.header_table.maxsize = new_size
         return consumed
 
     def _decode_indexed(self, data: bytes | memoryview) -> tuple[HeaderTuple, int]:
