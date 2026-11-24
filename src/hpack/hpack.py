@@ -298,10 +298,12 @@ class Encoder:
         """
         Serializes a header key-value tuple.
 
-        When sensitive is True, the header will not be added to the header table
-        (see https://www.rfc-editor.org/rfc/rfc7541.html#section-7.1.3 for details),
-        furthermore, the header value will be redacted in debug logs, as "SENSITIVE_REDACTED",
-        to prevent accidental exposure of sensitive information.
+        When sensitive is True, the header will not be added to the header table,
+        and it will be encoded as a never-indexed literal even if the dynamic table
+        already contains a full match
+        (see https://www.rfc-editor.org/rfc/rfc7541.html#section-7.1.3 for details).
+        Furthermore, the header value will be redacted in debug logs, as
+        "SENSITIVE_REDACTED", to prevent accidental exposure of sensitive information.
         """
         name, value = to_add
 
@@ -333,8 +335,12 @@ class Encoder:
         # can use the indexed literal.
         index, name, perfect = match
 
-        if perfect is not None:
-            # Indexed representation.
+        if perfect is not None and (not sensitive or index <= HeaderTable.STATIC_TABLE_LENGTH):
+            # Indexed representation. Static table entries are public, so they
+            # are safe to use even for sensitive headers. A matching dynamic
+            # table entry is connection-specific: using it for a sensitive
+            # header would reveal that the value was already present and would
+            # keep the sensitive value in active use as shared state.
             encoded = self._encode_indexed(index)
         else:
             # Indexed literal. We are going to add header to the

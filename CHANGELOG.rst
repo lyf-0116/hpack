@@ -12,6 +12,8 @@ dev
 
 **Bugfixes**
 
+- Sensitive headers that exactly match an entry in the dynamic table are now
+  encoded as never-indexed literals instead of indexed representations.
 
 4.2.0 (2026-06-22)
 ------------------

@@ -95,6 +95,29 @@ class TestHPACKEncoder:
         ]
         assert e.encode(header_set, huffman=True) == result
 
+    def test_sensitive_header_with_exact_dynamic_table_match_is_never_indexed(self):
+        """
+        A sensitive header must not reuse an exact match from the dynamic
+        table, even though the value is already present there.
+        """
+        e = Encoder()
+        public_header = ('my-password', 'same-value')
+
+        first_result = e.encode([public_header], huffman=False)
+        assert first_result == b'\x40\x0bmy-password\x0asame-value'
+        assert list(e.header_table.dynamic_entries) == [(b'my-password', b'same-value')]
+
+        sensitive_result = e.encode([('my-password', 'same-value', True)], huffman=False)
+        assert sensitive_result == b'\x1f\x2f\x0asame-value'
+        assert list(e.header_table.dynamic_entries) == [(b'my-password', b'same-value')]
+
+        d = Decoder()
+        d.decode(first_result)
+        assert d.decode(sensitive_result) == [NeverIndexedHeaderTuple('my-password', 'same-value')]
+        assert list(d.header_table.dynamic_entries) == [(b'my-password', b'same-value')]
+
+        assert e.encode([public_header], huffman=False) == b'\xbe'
+
     def test_header_table_size_getter(self):
         e = Encoder()
         assert e.header_table_size == 4096
