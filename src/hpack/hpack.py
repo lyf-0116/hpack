@@ -181,8 +181,9 @@ class Encoder:
 
     @header_table_size.setter
     def header_table_size(self, value: int) -> None:
-        self.header_table.maxsize = value
-        if self.header_table.resized:
+        value = int(value)
+        if value != self.header_table.maxsize:
+            self.header_table.maxsize = value
             self.table_size_changes.append(value)
 
     def encode(self,

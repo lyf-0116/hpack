@@ -14,7 +14,7 @@ from hpack import (
     OversizedHeaderListError,
     InvalidTableSizeError,
 )
-from hpack.hpack import _dict_to_iterable, _to_bytes
+from hpack.hpack import _dict_to_iterable, _to_bytes, encode_integer
 
 
 def test_to_bytes():
@@ -320,6 +320,28 @@ class TestHPACKEncoder:
         header_set = [(':method', 'GET')]
         out = e.encode(header_set, huffman=True)
         assert out == b'\x3F\x09\x3F\x45\x3F\x09\x82'
+
+    @pytest.mark.parametrize("sizes", [(0,), (128,), (0, 4096)])
+    def test_repeated_table_size_preserves_pending_updates(self, sizes):
+        """
+        Repeating the last table size assignment does not discard the pending
+        size updates for the next header block.
+        """
+        e = Encoder()
+        d = Decoder()
+        header_set = [('custom-key', 'custom-value')]
+        assert d.decode(e.encode(header_set)) == header_set
+
+        for size in sizes:
+            e.header_table_size = size
+        e.header_table_size = sizes[-1]
+        d.max_allowed_table_size = sizes[-1]
+
+        assert d.decode(e.encode([])) == []
+        assert d.header_table_size == sizes[-1]
+        assert list(d.header_table.dynamic_entries) == list(e.header_table.dynamic_entries)
+        assert d.decode(e.encode(header_set)) == header_set
+        assert e.encode([(':method', 'GET')]) == b'\x82'
 
     def test_resizing_header_table_sends_context_update(self):
         e = Encoder()
@@ -683,6 +705,25 @@ class TestHPACKDecoder:
         ]
 
         assert d.decode(data) == expect
+
+    def test_multiple_table_size_changes_evict_between_updates(self):
+        """
+        A shrink followed by a grow in the same header block evicts entries
+        while the intermediate smaller limit is in effect.
+        """
+        d = Decoder()
+        d.header_table.add(b'x-a', b'A' * 40)
+        d.header_table.add(b'x-b', b'B' * 40)
+        assert len(d.header_table.dynamic_entries) == 2
+
+        shrink = encode_integer(50, 5)
+        shrink[0] |= 0x20
+        grow = encode_integer(4096, 5)
+        grow[0] |= 0x20
+
+        assert d.decode(bytes(shrink) + bytes(grow)) == []
+        assert d.header_table_size == 4096
+        assert len(d.header_table.dynamic_entries) == 0
 
     def test_header_table_size_change_above_maximum(self):
         """

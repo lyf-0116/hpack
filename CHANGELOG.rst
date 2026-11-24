@@ -12,6 +12,9 @@ dev
 
 **Bugfixes**
 
+- Header table size updates are no longer discarded when the same size is
+  assigned more than once before the next header block is encoded.
+
 
 4.2.0 (2026-06-22)
 ------------------
