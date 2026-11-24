@@ -69,16 +69,23 @@ iterations is 4x the number of bytes passed to the decoder.
 """
 from __future__ import annotations
 
-from .exceptions import HPACKDecodingError
+from .exceptions import HPACKDecodingError, OversizedHeaderListError
 
 
 # This defines the state machine "class" at the top of the file. The reason we
 # do this is to keep the terrifing monster state table at the *bottom* of the
 # file so you don't have to actually *look* at the damn thing.
-def decode_huffman(huffman_string: bytes | bytearray | memoryview | None) -> bytes:
+def decode_huffman(
+    huffman_string: bytes | bytearray | memoryview | None,
+    max_output_length: int | None = None,
+) -> bytes:
     """
     Given a bytestring of Huffman-encoded data for HPACK, returns a bytestring
     of the decompressed data.
+
+    If ``max_output_length`` is provided, decoding stops with an
+    :class:`OversizedHeaderListError <hpack.OversizedHeaderListError>` before
+    the decoded string grows beyond that many bytes.
     """
     if not huffman_string:
         return b""
@@ -105,6 +112,9 @@ def decode_huffman(huffman_string: bytes | bytearray | memoryview | None) -> byt
             raise HPACKDecodingError(msg)
 
         if flags & HUFFMAN_EMIT_SYMBOL:
+            if max_output_length is not None and len(decoded_bytes) >= max_output_length:
+                msg = "Huffman-decoded string exceeds the header list size limit"
+                raise OversizedHeaderListError(msg)
             decoded_bytes.append(output_byte)
 
         index = (state * 16) + (input_byte & 0x0F)
@@ -115,6 +125,9 @@ def decode_huffman(huffman_string: bytes | bytearray | memoryview | None) -> byt
             raise HPACKDecodingError(msg)
 
         if flags & HUFFMAN_EMIT_SYMBOL:
+            if max_output_length is not None and len(decoded_bytes) >= max_output_length:
+                msg = "Huffman-decoded string exceeds the header list size limit"
+                raise OversizedHeaderListError(msg)
             decoded_bytes.append(output_byte)
 
     if not (flags & HUFFMAN_COMPLETE):

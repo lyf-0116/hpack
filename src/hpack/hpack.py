@@ -496,7 +496,7 @@ class Decoder:
         data_mem = memoryview(data)
         headers: list[HeaderTuple] = []
         data_len = len(data)
-        inflated_size = 0
+        remaining_header_list_size = self.max_header_list_size
         current_index = 0
 
         while current_index < data_len:
@@ -521,6 +521,7 @@ class Decoder:
                 # It's a literal header that does affect the header table.
                 header, consumed = self._decode_literal_index(
                     data_mem[current_index:],
+                    remaining_header_list_size,
                 )
             elif encoding_update:
                 # It's an update to the encoding context. These are forbidden
@@ -536,15 +537,16 @@ class Decoder:
                 # It's a literal header that does not affect the header table.
                 header, consumed = self._decode_literal_no_index(
                     data_mem[current_index:],
+                    remaining_header_list_size,
                 )
 
             if header:
-                headers.append(header)
-                inflated_size += table_entry_size(header[0], header[1])
+                header_size = table_entry_size(header[0], header[1])
+                if header_size > remaining_header_list_size:
+                    raise self._oversized_header_list_error()
 
-                if inflated_size > self.max_header_list_size:
-                    msg = f"A header list larger than {self.max_header_list_size} has been received"
-                    raise OversizedHeaderListError(msg)
+                headers.append(header)
+                remaining_header_list_size -= header_size
 
             current_index += consumed
 
@@ -568,6 +570,10 @@ class Decoder:
             msg = "Encoder did not shrink table size to within the max"
             raise InvalidTableSizeError(msg)
 
+    def _oversized_header_list_error(self) -> OversizedHeaderListError:
+        msg = f"A header list larger than {self.max_header_list_size} has been received"
+        return OversizedHeaderListError(msg)
+
     def _update_encoding_context(self, data: bytes | memoryview) -> int:
         """
         Handles a byte that updates the encoding context.
@@ -589,21 +595,77 @@ class Decoder:
         log.debug("Decoded %s, consumed %d", header, consumed)
         return header, consumed
 
-    def _decode_literal_no_index(self, data: bytes | memoryview) -> tuple[HeaderTuple, int]:
-        return self._decode_literal(data, should_index=False)
+    def _decode_literal_no_index(
+        self,
+        data: bytes | memoryview,
+        remaining_header_list_size: int | None = None,
+    ) -> tuple[HeaderTuple, int]:
+        return self._decode_literal(data, should_index=False, remaining_header_list_size=remaining_header_list_size)
 
-    def _decode_literal_index(self, data: bytes | memoryview) -> tuple[HeaderTuple, int]:
-        return self._decode_literal(data, should_index=True)
+    def _decode_literal_index(
+        self,
+        data: bytes | memoryview,
+        remaining_header_list_size: int | None = None,
+    ) -> tuple[HeaderTuple, int]:
+        return self._decode_literal(data, should_index=True, remaining_header_list_size=remaining_header_list_size)
 
-    def _decode_literal(self, data: bytes | memoryview, should_index: bool) -> tuple[HeaderTuple, int]:
+    def _decode_literal(
+        self,
+        data: bytes | memoryview,
+        should_index: bool,
+        remaining_header_list_size: int | None = None,
+    ) -> tuple[HeaderTuple, int]:
         """
         Decodes a header represented with a literal.
         """
+        if remaining_header_list_size is None:
+            remaining_header_list_size = self.max_header_list_size
+
         if isinstance(data, memoryview):
             data = data.tobytes()  # pragma: no cover
 
-        total_consumed = 0
+        name, data, total_consumed, not_indexable = self._decode_literal_name(
+            data,
+            should_index,
+            remaining_header_list_size,
+        )
+        value, value_consumed = self._decode_literal_value(
+            data,
+            name,
+            remaining_header_list_size,
+        )
+        total_consumed += value_consumed
 
+        # If we have been told never to index the header field, encode that in
+        # the tuple we use.
+        header: HeaderTuple
+        if not_indexable:
+            header = NeverIndexedHeaderTuple(name, value)
+        else:
+            header = HeaderTuple(name, value)
+
+        # If we've been asked to index this, add it to the header table.
+        if should_index:
+            self.header_table.add(name, value)
+
+        log.debug(
+            "Decoded %s, total consumed %d bytes, indexed %s",
+            header,
+            total_consumed,
+            should_index,
+        )
+
+        return header, total_consumed
+
+    def _decode_literal_name(
+        self,
+        data: bytes,
+        should_index: bool,
+        remaining_header_list_size: int,
+    ) -> tuple[bytes, bytes, int, bool]:
+        """
+        Decodes the name of a literal header and returns the remaining data.
+        """
         # When should_index is true, if the low six bits of the first byte are
         # nonzero, the header name is indexed.
         # When should_index is false, if the low four bits of the first byte
@@ -631,47 +693,46 @@ class Decoder:
             data = data[1:]
 
             length, consumed = decode_integer(data, 7)
+            huffman = bool(data[0] & 0x80)
+            max_name_length = remaining_header_list_size - 32
+            if length > remaining_header_list_size or (not huffman and length > max_name_length):
+                raise self._oversized_header_list_error()
+
             name = data[consumed:consumed + length]
             if len(name) != length:
                 msg = "Truncated header block"
                 raise HPACKDecodingError(msg)
 
-            if data[0] & 0x80:
-                name = decode_huffman(name)
+            if huffman:
+                name = decode_huffman(name, max_output_length=max_name_length)
             total_consumed = consumed + length + 1  # Since we moved forward 1.
 
         data = data[consumed + length:]
 
+        return name, data, total_consumed, not_indexable
+
+    def _decode_literal_value(
+        self,
+        data: bytes,
+        name: bytes,
+        remaining_header_list_size: int,
+    ) -> tuple[bytes, int]:
+        """
+        Decodes the value of a literal header.
+        """
         # The header value is definitely length-based.
         length, consumed = decode_integer(data, 7)
+        huffman = bool(data[0] & 0x80)
+        max_value_length = remaining_header_list_size - table_entry_size(name, b"")
+        if length > remaining_header_list_size or (not huffman and length > max_value_length):
+            raise self._oversized_header_list_error()
+
         value = data[consumed:consumed + length]
         if len(value) != length:
             msg = "Truncated header block"
             raise HPACKDecodingError(msg)
 
-        if data[0] & 0x80:
-            value = decode_huffman(value)
+        if huffman:
+            value = decode_huffman(value, max_output_length=max_value_length)
 
-        # Updated the total consumed length.
-        total_consumed += length + consumed
-
-        # If we have been told never to index the header field, encode that in
-        # the tuple we use.
-        header: HeaderTuple
-        if not_indexable:
-            header = NeverIndexedHeaderTuple(name, value)
-        else:
-            header = HeaderTuple(name, value)
-
-        # If we've been asked to index this, add it to the header table.
-        if should_index:
-            self.header_table.add(name, value)
-
-        log.debug(
-            "Decoded %s, total consumed %d bytes, indexed %s",
-            header,
-            total_consumed,
-            should_index,
-        )
-
-        return header, total_consumed
+        return value, length + consumed

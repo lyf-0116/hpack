@@ -668,6 +668,84 @@ class TestHPACKDecoder:
         with pytest.raises(OversizedHeaderListError):
             d.decode(data)
 
+    def test_max_header_list_size_rejects_oversized_literal_name_before_decoding(self, monkeypatch):
+        """
+        An oversized literal name length prefix is rejected before the string
+        is sliced or Huffman-decoded.
+        """
+        d = Decoder(max_header_list_size=44)
+        monkeypatch.setattr(
+            "hpack.hpack.decode_huffman",
+            lambda *args, **kwargs: pytest.fail("oversized string was decoded"),
+        )
+        data = b'\x00\xe4' + (b'\x00' * 100)
+
+        with pytest.raises(OversizedHeaderListError):
+            d.decode(data)
+
+    def test_max_header_list_size_rejects_oversized_literal_value_before_decoding(self, monkeypatch):
+        """
+        An oversized literal value length prefix is rejected before the string
+        is sliced or Huffman-decoded.
+        """
+        d = Decoder(max_header_list_size=44)
+        monkeypatch.setattr(
+            "hpack.hpack.decode_huffman",
+            lambda *args, **kwargs: pytest.fail("oversized string was decoded"),
+        )
+        data = b'\x04\xe4' + (b'\x00' * 100)
+
+        with pytest.raises(OversizedHeaderListError):
+            d.decode(data)
+
+    def test_max_header_list_size_budget_decrements_between_headers(self, monkeypatch):
+        """
+        The quota passed to string decoding is the remaining header list size,
+        not the original maximum.
+        """
+        d = Decoder(max_header_list_size=80)
+        monkeypatch.setattr(
+            "hpack.hpack.decode_huffman",
+            lambda *args, **kwargs: pytest.fail("string exceeded the remaining quota"),
+        )
+        first_header = b'\x00\x01a\x07' + (b'a' * 7)
+        second_header = b'\x00\x01b\xb2' + (b'\x00' * 50)
+
+        with pytest.raises(OversizedHeaderListError):
+            d.decode(first_header + second_header)
+
+    def test_max_header_list_size_allows_exact_limit(self):
+        d = Decoder(max_header_list_size=49)
+        data = b'\x14\x0c/sample/path'
+
+        assert d.decode(data) == [(':path', '/sample/path')]
+
+    def test_huffman_length_prefix_may_exceed_decoded_value_budget(self):
+        """
+        A Huffman-encoded string can be longer than its decoded form. The
+        encoded prefix is capped by the remaining quota, while the decoded
+        output is capped by the size the header can occupy.
+        """
+        value = b'\x00' * 5
+        data = Encoder().encode([('a', value)], huffman=True)
+        d = Decoder(max_header_list_size=38)
+
+        assert d.decode(data, raw=True) == [(b'a', value)]
+
+    def test_max_header_list_size_rejects_oversized_indexed_header(self):
+        d = Decoder(max_header_list_size=40)
+
+        with pytest.raises(OversizedHeaderListError):
+            d.decode(b'\x82')
+
+    def test_decode_literal_uses_decoder_limit_when_not_provided(self):
+        d = Decoder()
+
+        header, consumed = d._decode_literal_no_index(b'\x04\x0c/sample/path')
+
+        assert header == HeaderTuple(b':path', b'/sample/path')
+        assert consumed == 14
+
     def test_can_decode_multiple_header_table_size_changes(self):
         """
         If multiple header table size changes are sent in at once, they are
@@ -762,6 +840,13 @@ class TestHPACKDecoder:
             b'\x82\x87\x84A\x8a\x08\x9d\\\x0b\x81p\xdcy\xa6\x99'
             b'\x00\x85\xf2\xb2J\x87\xff\xff\xff\xfd%B\x7f'
         )
+
+        with pytest.raises(HPACKDecodingError):
+            d.decode(data)
+
+    def test_truncated_header_value_within_size_limit(self):
+        d = Decoder()
+        data = b'\x00\x01a\x05xy'
 
         with pytest.raises(HPACKDecodingError):
             d.decode(data)

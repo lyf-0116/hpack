@@ -12,6 +12,10 @@ dev
 
 **Bugfixes**
 
+- Header string length prefixes are now checked against the remaining header
+  list size before the string is sliced or Huffman-decoded, preventing
+  untrusted length prefixes from driving oversized allocations.
+
 
 4.2.0 (2026-06-22)
 ------------------

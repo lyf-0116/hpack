@@ -1,4 +1,6 @@
-from hpack import HPACKDecodingError
+import pytest
+
+from hpack import HPACKDecodingError, OversizedHeaderListError
 from hpack.huffman import HuffmanEncoder
 from hpack.huffman_constants import REQUEST_CODES, REQUEST_CODES_LENGTH
 from hpack.huffman_table import decode_huffman
@@ -19,6 +21,16 @@ class TestHuffman:
         assert (
             decode_huffman(b'%\xa8I\xe9[\xb8\xe8\xb4\xbf') == b"custom-value"
         )
+
+    @pytest.mark.parametrize("max_output_length", range(16))
+    def test_decoder_honors_max_output_length(self, max_output_length):
+        encoded = b'\xf1\xe3\xc2\xe5\xf2:k\xa0\xab\x90\xf4\xff'
+
+        if max_output_length == 15:
+            assert decode_huffman(encoded, max_output_length=max_output_length) == b"www.example.com"
+        else:
+            with pytest.raises(OversizedHeaderListError):
+                decode_huffman(encoded, max_output_length=max_output_length)
 
     def test_request_huffman_encode(self):
         encoder = HuffmanEncoder(REQUEST_CODES, REQUEST_CODES_LENGTH)
