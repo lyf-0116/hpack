@@ -141,3 +141,31 @@ class TestHeaderTable:
         tbl.maxsize = 146
         assert len(tbl.dynamic_entries) == 2
         assert tbl._current_size == 98
+
+    def test_shrink_uses_insertion_sequence_not_storage_order(self):
+        tbl = HeaderTable()
+        off = len(HeaderTable.STATIC_TABLE)
+        for value in (b'1', b'2', b'3'):
+            tbl.add(b'x', value)
+
+        # The storage order is an implementation detail. Reordering it must
+        # not change which entry the protocol considers oldest.
+        tbl.dynamic_entries.rotate(1)
+        tbl.maxsize = 68
+
+        assert list(tbl.dynamic_entries) == [(b'x', b'3'), (b'x', b'2')]
+        assert tbl.get_by_index(off + 1) == (b'x', b'3')
+        assert tbl.get_by_index(off + 2) == (b'x', b'2')
+
+    def test_clear_resets_insertion_sequence(self):
+        tbl = HeaderTable()
+        tbl.add(b'x', b'1')
+        tbl.add(b'x', b'2')
+
+        tbl.maxsize = 0
+        assert tbl._next_sequence == 0
+
+        tbl.maxsize = HeaderTable.DEFAULT_SIZE
+        tbl.add(b'x', b'3')
+
+        assert tbl.dynamic_entries[0].sequence == 0

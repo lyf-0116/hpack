@@ -1,5 +1,6 @@
 # flake8: noqa
 from collections import deque
+from collections.abc import Iterator
 import logging
 from typing import Optional
 
@@ -21,6 +22,49 @@ def table_entry_size(name: bytes, value: bytes) -> int:
     See RFC7541 Section 4.1
     """
     return 32 + len(name) + len(value)
+
+
+class HeaderTableEntry:
+    """
+    A dynamic table entry with an explicit insertion sequence number.
+
+    Behaves like the ``(name, value)`` tuple that it replaces, while keeping
+    insertion order out of the storage order of the underlying deque.
+    """
+
+    __slots__ = ("name", "value", "sequence")
+
+    name: bytes
+    value: bytes
+    sequence: int
+
+    def __init__(self, name: bytes, value: bytes, sequence: int) -> None:
+        self.name = name
+        self.value = value
+        self.sequence = sequence
+
+    def __iter__(self) -> Iterator[bytes]:
+        yield self.name
+        yield self.value
+
+    def __len__(self) -> int:
+        return 2
+
+    def __getitem__(self, index: int) -> bytes:
+        return (self.name, self.value)[index]
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, HeaderTableEntry):
+            return (self.name, self.value) == (other.name, other.value)
+        if isinstance(other, tuple) and len(other) == 2:
+            return (self.name, self.value) == other
+        return False
+
+    def __hash__(self) -> int:
+        return hash((self.name, self.value))
+
+    def __repr__(self) -> str:
+        return repr((self.name, self.value))
 
 
 class HeaderTable:
@@ -110,8 +154,9 @@ class HeaderTable:
     def __init__(self) -> None:
         self._maxsize = HeaderTable.DEFAULT_SIZE
         self._current_size = 0
+        self._next_sequence = 0
         self.resized = False
-        self.dynamic_entries: deque[tuple[bytes, bytes]] = deque()
+        self.dynamic_entries: deque[HeaderTableEntry] = deque()
 
     def get_by_index(self, index: int) -> tuple[bytes, bytes]:
         """
@@ -132,8 +177,10 @@ class HeaderTable:
                 return HeaderTable.STATIC_TABLE[index]
 
             index -= HeaderTable.STATIC_TABLE_LENGTH
-            if index < len(self.dynamic_entries):
-                return self.dynamic_entries[index]
+            entries = self._ordered_entries()
+            if index < len(entries):
+                entry = entries[index]
+                return entry.name, entry.value
 
         raise InvalidTableIndex("Invalid table index %d" % original_index)
 
@@ -154,11 +201,12 @@ class HeaderTable:
         # We just clear the table if the entry is too big
         size = table_entry_size(name, value)
         if size > self._maxsize:
-            self.dynamic_entries.clear()
-            self._current_size = 0
+            self._clear()
         else:
             # Add new entry
-            self.dynamic_entries.appendleft((name, value))
+            entry = HeaderTableEntry(name, value, self._next_sequence)
+            self._next_sequence += 1
+            self.dynamic_entries.appendleft(entry)
             self._current_size += size
             self._shrink()
 
@@ -183,12 +231,12 @@ class HeaderTable:
                 partial = (header_name_search_result[0], name, None)
 
         offset = HeaderTable.STATIC_TABLE_LENGTH + 1
-        for (i, (n, v)) in enumerate(self.dynamic_entries):
-            if n == name:
-                if v == value:
-                    return i + offset, n, v
+        for (i, entry) in enumerate(self._ordered_entries()):
+            if entry.name == name:
+                if entry.value == value:
+                    return i + offset, entry.name, entry.value
                 elif partial is None:
-                    partial = (i + offset, n, None)
+                    partial = (i + offset, entry.name, None)
         return partial
 
     @property
@@ -203,21 +251,56 @@ class HeaderTable:
         self._maxsize = newmax
         self.resized = (newmax != oldmax)
         if newmax <= 0:
-            self.dynamic_entries.clear()
-            self._current_size = 0
+            self._clear()
         elif oldmax > newmax:
             self._shrink()
+
+    def _ordered_entries(self) -> list[HeaderTableEntry]:
+        """
+        Return entries newest-first by insertion sequence.
+
+        Insertion order is protocol state. It must not depend on where an
+        implementation happens to store an entry.
+        """
+        entries = list(self.dynamic_entries)
+        if any(
+            current.sequence < following.sequence
+            for current, following in zip(entries, entries[1:])
+        ):
+            entries.sort(key=lambda entry: entry.sequence, reverse=True)
+            self.dynamic_entries = deque(entries)
+        return entries
 
     def _shrink(self) -> None:
         """
         Shrinks the dynamic table to be at or below maxsize
         """
         cursize = self._current_size
-        while cursize > self._maxsize:
-            name, value = self.dynamic_entries.pop()
-            cursize -= table_entry_size(name, value)
-            log.debug("Evicting %s: %s from the header table", name, value)
+        while cursize > self._maxsize and self.dynamic_entries:
+            oldest = min(self.dynamic_entries, key=lambda entry: entry.sequence)
+            cursize -= table_entry_size(oldest.name, oldest.value)
+            self._remove_entry(oldest.sequence)
+            log.debug(
+                "Evicting %s: %s from the header table",
+                oldest.name,
+                oldest.value,
+            )
         self._current_size = cursize
+        if not self.dynamic_entries:
+            self._clear()
+        else:
+            self._ordered_entries()
+
+    def _remove_entry(self, sequence: int) -> None:
+        for index, entry in enumerate(self.dynamic_entries):
+            if entry.sequence == sequence:
+                del self.dynamic_entries[index]
+                return
+
+    def _clear(self) -> None:
+        self.dynamic_entries.clear()
+        self._current_size = 0
+        self._next_sequence = 0
 
 
 def _build_static_table_mapping() -> dict[bytes, tuple[int, dict[bytes, int]]]:

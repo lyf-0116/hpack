@@ -12,6 +12,9 @@ dev
 
 **Bugfixes**
 
+- Dynamic table eviction now follows insertion order, keeping encoders and
+  decoders synchronized after table clears and size changes.
+
 
 4.2.0 (2026-06-22)
 ------------------
